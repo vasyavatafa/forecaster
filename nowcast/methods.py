@@ -156,22 +156,25 @@ class VARJointMethod:
         if len(data) < self.p + 5:
             return out
 
-        try:
-            if self.q == 0:
-                from statsmodels.tsa.api import VAR
+        # NB: no blanket try/except here -- a real fitting failure (bad
+        # `trend`/`p`/`q`, singular window, non-convergence, ...) is left
+        # to propagate so the walk-forward loop in backtest.py can catch
+        # it, log a visible [WARN] for that specific date, and move on.
+        # Only genuinely insufficient data (checked above) returns NaN
+        # silently.
+        if self.q == 0:
+            from statsmodels.tsa.api import VAR
 
-                model = VAR(data)
-                res = model.fit(maxlags=self.p, trend=self.trend, ic=None)
-                y_hist = data.values[-res.k_ar :] if res.k_ar > 0 else data.values[-1:]
-                fc = res.forecast(y_hist, steps=1)[0]
-            else:
-                from statsmodels.tsa.statespace.varmax import VARMAX
+            model = VAR(data)
+            res = model.fit(maxlags=self.p, trend=self.trend, ic=None)
+            y_hist = data.values[-res.k_ar :] if res.k_ar > 0 else data.values[-1:]
+            fc = res.forecast(y_hist, steps=1)[0]
+        else:
+            from statsmodels.tsa.statespace.varmax import VARMAX
 
-                model = VARMAX(data, order=(self.p, self.q), trend=self.trend)
-                res = model.fit(disp=False, maxiter=50)
-                fc = res.forecast(steps=1).values[0]
-        except Exception:
-            return out
+            model = VARMAX(data, order=(self.p, self.q), trend=self.trend)
+            res = model.fit(disp=False, maxiter=50)
+            fc = res.forecast(steps=1).values[0]
 
         fc = pd.Series(fc, index=valid_cols)
         if self.d == 1:

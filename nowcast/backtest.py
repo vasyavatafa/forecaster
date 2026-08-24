@@ -26,6 +26,7 @@ import pandas as pd
 
 from . import metrics as M
 from .data import SeriesCoverage
+from .logging_utils import RateLimitedWarner, log_fail, log_ok, progress
 
 
 @dataclass
@@ -74,6 +75,7 @@ def run_walk_forward_univariate(
     method,
     min_history: int = 10,
     cutoff_frac: float = 0.7,
+    show_progress: bool = True,
 ) -> WalkForwardResult | None:
     if coverage.first_valid is None:
         return None
@@ -82,12 +84,22 @@ def run_walk_forward_univariate(
     if start_pos >= len(full_index) - 1:
         return None
 
+    method_name = getattr(method, "display_name", type(method).__name__)
+    col_name = str(series.name)
+    stage = f"{method_name} | {col_name}"
+    warner = RateLimitedWarner(stage)
+
     fc_vals, dates = [], []
     t0 = time.perf_counter()
-    for t_pos in range(start_pos, len(full_index) - 1):
+    steps = range(start_pos, len(full_index) - 1)
+    for t_pos in progress(steps, desc=stage, leave=False, disable=not show_progress):
         history = series.iloc[: t_pos + 1]
         target_date = full_index[t_pos + 1]
-        pred = method.step(history)
+        try:
+            pred = method.step(history)
+        except Exception as exc:  # a single bad window shouldn't kill the whole run
+            warner.warn(str(target_date.date()), exc)
+            pred = np.nan
         fc_vals.append(pred)
         dates.append(target_date)
     elapsed = time.perf_counter() - t0
@@ -101,9 +113,20 @@ def run_walk_forward_univariate(
         cutoff = forecast.index.min()
     train_m, test_m, n_tr, n_te = _split_metrics(forecast, actual, cutoff, prev_actual)
 
+    step_warn = warner.summary()
+    if forecast.notna().sum() == 0 and warner.count > 0:
+        # every single step raised -- this is a stage failure (bad config,
+        # not just an isolated bad window), not a success with some noise
+        log_fail(stage, f"all {warner.count} step(s) failed, see [WARN] lines above")
+    elif show_progress:
+        detail = f"n_train={n_tr} n_test={n_te} test_rmse={test_m.get('rmse'):.4g} ({elapsed:.2f}s)"
+        if step_warn:
+            detail += f" [{step_warn}]"
+        log_ok(stage, detail)
+
     return WalkForwardResult(
-        column=str(series.name),
-        method_name=getattr(method, "display_name", type(method).__name__),
+        column=col_name,
+        method_name=method_name,
         params=getattr(method, "__dict__", {}),
         forecast=forecast,
         actual=actual,
@@ -122,6 +145,7 @@ def run_walk_forward_multivariate(
     method,
     min_history: int = 10,
     cutoff_frac: float = 0.7,
+    show_progress: bool = True,
 ) -> dict[str, WalkForwardResult]:
     """One shared walk-forward loop producing forecasts for all columns
     of `df` jointly at every step; metrics are then split per column
@@ -132,22 +156,32 @@ def run_walk_forward_multivariate(
     if start_pos >= len(full_index) - 1:
         return {}
 
+    method_name = getattr(method, "display_name", type(method).__name__)
+    stage = f"{method_name} | {'+'.join(df.columns)}"
+    warner = RateLimitedWarner(stage)
+
     rows, dates = [], []
     t0 = time.perf_counter()
-    for t_pos in range(start_pos, len(full_index) - 1):
+    steps = range(start_pos, len(full_index) - 1)
+    for t_pos in progress(steps, desc=stage, leave=False, disable=not show_progress):
         history = df.iloc[: t_pos + 1]
         target_date = full_index[t_pos + 1]
-        pred_row = method.step(history)
+        try:
+            pred_row = method.step(history)
+        except Exception as exc:  # a single bad window shouldn't kill the whole run
+            warner.warn(str(target_date.date()), exc)
+            pred_row = pd.Series(np.nan, index=df.columns)
         rows.append(pred_row)
         dates.append(target_date)
     elapsed = time.perf_counter() - t0
 
     forecast_df = pd.DataFrame(rows, index=pd.DatetimeIndex(dates))
     results: dict[str, WalkForwardResult] = {}
-    per_step_time = elapsed / max(len(dates), 1)
+    step_warn = warner.summary()
 
     for col in df.columns:
         cov = coverage[col]
+        col_stage = f"{method_name} | {col}"
         if cov.first_valid is None or col not in forecast_df.columns:
             continue
         forecast = forecast_df[col]
@@ -157,9 +191,20 @@ def run_walk_forward_multivariate(
         if cutoff is None or cutoff < forecast.index.min():
             cutoff = forecast.index.min()
         train_m, test_m, n_tr, n_te = _split_metrics(forecast, actual, cutoff, prev_actual)
+
+        if forecast.notna().sum() == 0 and warner.count > 0:
+            # every single step raised for this joint model -- a stage
+            # failure (bad config), not a success with some noise
+            log_fail(col_stage, f"all {warner.count} step(s) failed, see [WARN] lines above")
+        elif show_progress:
+            detail = f"n_train={n_tr} n_test={n_te} test_rmse={test_m.get('rmse'):.4g}"
+            if step_warn:
+                detail += f" [{step_warn}]"
+            log_ok(col_stage, detail)
+
         results[col] = WalkForwardResult(
             column=col,
-            method_name=getattr(method, "display_name", type(method).__name__),
+            method_name=method_name,
             params=getattr(method, "__dict__", {}),
             forecast=forecast,
             actual=actual,

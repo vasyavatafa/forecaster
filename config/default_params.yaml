@@ -1,0 +1,68 @@
+# Default hyperparameters for each of the 5 nowcasting methods.
+#
+# These are the values used to construct a method when the caller does
+# not pass method_params=... explicitly (NowcastPipeline.run,
+# .run_all_methods, .forecast_table all fall back to this file). Edit
+# values here to change defaults project-wide without touching any
+# code; a `method_params={...}` override passed at call time always
+# wins over whatever is written here.
+#
+# `null` (YAML for None) means "use the full available history instead
+# of a trailing window" wherever a `window` field accepts it.
+#
+# These are single default VALUES, not search ranges. The ranges used
+# by grid_search()/search_all_methods() live separately, as the
+# `param_grid` class attribute on each method in nowcast/methods.py and
+# nowcast/nn_method.py (pass your own param_grid=... to override those).
+
+rolling_mean:
+  # forecast for t+1 = mean of x_{t-window+1..t}, using only the real
+  # (non-interpolated) points inside the window
+  window: 8            # trailing window length, in weeks
+
+linear_trend:
+  # OLS (or Theil-Sen) line fit through the trailing window, extrapolated
+  # one real calendar week ahead (accounts for gaps inside the window,
+  # not just index position)
+  window: 12            # trailing window length, in weeks
+  robust: false          # false = ordinary least squares (faster);
+                          # true = Theil-Sen (robust to the outliers/shocks
+                          # that land inside the window, slower)
+
+var_multivariate:
+  # statsmodels VAR (q=0, fast OLS-per-equation) or VARMAX (q>0, slower
+  # MLE) fit jointly on all selected columns; columns without enough
+  # observations in the current window are dynamically dropped from
+  # that step's joint model rather than blocking every column's forecast
+  window: 52             # trailing window length, in weeks; null = all available history
+  p: 2                    # autoregressive order (how many own+cross lags enter each equation)
+  d: 0                     # differencing order: 0 = fit on levels, 1 = fit on first differences
+                            # (forecast is added back to the last level automatically)
+  q: 0                      # moving-average order; 0 keeps the fast VAR path, >0 switches to VARMAX
+  trend: "c"                 # deterministic term: "c" = constant, "n" = none, "ct" = constant + linear trend
+
+bayesian_ar:
+  # sklearn BayesianRidge on `lags` autoregressive features (+ optional
+  # linear-time feature); the Gaussian prior on the coefficients is
+  # regularized by evidence maximization, which shrinks harder on short/
+  # noisy windows and relaxes once there's more signal -- see README for
+  # the full rationale
+  window: 52              # trailing window length, in weeks; null = all available history
+  lags: 4                  # number of autoregressive lag features
+  trend: true                # add a within-window linear time feature alongside the AR lags
+
+nn_revin:
+  # small MLP over the raw trailing window (after RevIN instance
+  # normalization) plus compact rolling statistics (mean/std/min/max/
+  # trend/autocorr) of every selected column, forecasting all columns
+  # jointly in one pass; warm-started rather than retrained from scratch
+  # at every walk-forward step (see full_retrain below)
+  window: 26                # trailing window length fed to the network AND the RevIN normalization window, in weeks
+  hidden: 64                  # width of the first MLP hidden layer (second hidden layer is hidden // 2)
+  epochs_init: 60              # epochs used for the very first training pass (cold start) on a given active-column set
+  epochs_refit: 5               # epochs of fine-tuning applied at every later walk-forward step (warm start)
+  lr: 0.001                      # Adam learning rate
+  batch_history: 64                # max number of historical (window -> next value) examples sampled per warm-start refit
+  full_retrain: false                # true = discard the network and retrain from scratch at every single step
+                                       # (a literal "always refit", much slower -- default is warm-start instead)
+  seed: 0                              # RNG seed (numpy + torch) for reproducibility

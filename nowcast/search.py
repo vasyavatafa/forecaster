@@ -1,6 +1,10 @@
 """Hyperparameter grid search across all 5 method families, with a
 runtime estimator (time a handful of configs, extrapolate to the full
 grid) and a top-10-per-method-family selector.
+
+Every (config, column) unit is run in isolation: if it raises, a red
+[FAIL] line is logged naming the method/column/params and the run
+continues with the next unit instead of the whole grid search crashing.
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ from joblib import Parallel, delayed
 
 from .backtest import run_walk_forward_multivariate, run_walk_forward_univariate
 from .data import SeriesCoverage
+from .logging_utils import log_fail, log_ok, progress
 from .methods import METHOD_REGISTRY, MULTIVARIATE_METHODS
 
 
@@ -26,8 +31,13 @@ def expand_grid(param_grid: dict) -> list[dict]:
 
 
 def _run_one_univariate(method_name, params, series, coverage, min_history, cutoff_frac):
-    method = METHOD_REGISTRY[method_name](**params)
-    res = run_walk_forward_univariate(series, coverage, method, min_history, cutoff_frac)
+    stage = f"{method_name} | {series.name} | {params}"
+    try:
+        method = METHOD_REGISTRY[method_name](**params)
+        res = run_walk_forward_univariate(series, coverage, method, min_history, cutoff_frac, show_progress=False)
+    except Exception as exc:  # bad config for this column -- skip it, keep searching the rest of the grid
+        log_fail(stage, exc)
+        return None
     if res is None:
         return None
     row = {"method": method_name, "column": res.column, "params": params,
@@ -39,8 +49,13 @@ def _run_one_univariate(method_name, params, series, coverage, min_history, cuto
 
 
 def _run_one_multivariate(method_name, params, df, coverage, min_history, cutoff_frac):
-    method = METHOD_REGISTRY[method_name](**params)
-    results = run_walk_forward_multivariate(df, coverage, method, min_history, cutoff_frac)
+    stage = f"{method_name} | {'+'.join(df.columns)} | {params}"
+    try:
+        method = METHOD_REGISTRY[method_name](**params)
+        results = run_walk_forward_multivariate(df, coverage, method, min_history, cutoff_frac, show_progress=False)
+    except Exception as exc:  # bad config for this joint column set -- skip it, keep searching the rest of the grid
+        log_fail(stage, exc)
+        return []
     rows = []
     for col, res in results.items():
         row = {"method": method_name, "column": col, "params": params,
@@ -121,6 +136,7 @@ def run_grid_search(
     n_jobs: int = 1,
     rank_metric: str = "test_rmse",
     top_k: int = 10,
+    show_progress: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame] | pd.DataFrame]:
     """Runs the full grid for one method family.
 
@@ -131,23 +147,34 @@ def run_grid_search(
     """
     combos = expand_grid(param_grid)
     is_multi = method_name in MULTIVARIATE_METHODS
+    stage = f"grid_search | {method_name}"
 
     if is_multi:
         sub_cov = {c: coverage[c] for c in columns}
-        jobs = (
+        jobs = [
             delayed(_run_one_multivariate)(method_name, cfg, df[columns], sub_cov, min_history, cutoff_frac)
             for cfg in combos
-        )
-        nested = Parallel(n_jobs=n_jobs, prefer="processes")(jobs)
-        rows = [r for sub in nested for r in sub]
+        ]
     else:
-        jobs = (
+        jobs = [
             delayed(_run_one_univariate)(method_name, cfg, df[col], coverage[col], min_history, cutoff_frac)
             for cfg in combos
             for col in columns
-        )
-        rows = Parallel(n_jobs=n_jobs, prefer="processes")(jobs)
-        rows = [r for r in rows if r is not None]
+        ]
+
+    results_iter = Parallel(n_jobs=n_jobs, prefer="processes", return_as="generator")(jobs)
+    collected = list(progress(results_iter, desc=stage, total=len(jobs), disable=not show_progress))
+
+    if is_multi:
+        rows = [r for sub in collected if sub for r in sub]
+    else:
+        rows = [r for r in collected if r is not None]
+
+    n_units_failed = sum(1 for r in collected if not r)
+    detail = f"{len(combos)} configs x {len(columns)} column(s), {len(rows)} result row(s)"
+    if n_units_failed:
+        detail += f" ({n_units_failed} unit(s) failed, see [FAIL] lines above)"
+    log_ok(stage, detail)
 
     all_df = pd.DataFrame(rows)
     if all_df.empty:

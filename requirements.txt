@@ -6,3 +6,5 @@ statsmodels
 openpyxl
 joblib
 torch
+tqdm
+pyyaml

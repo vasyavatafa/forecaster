@@ -174,28 +174,46 @@ class NNRevINMethod:
             self._opt.step()
 
     def step(self, history: pd.DataFrame) -> pd.Series:
-        cols = list(history.columns)
-        out = pd.Series(np.nan, index=cols)
+        all_cols = list(history.columns)
+        out = pd.Series(np.nan, index=all_cols)
         if len(history) <= self.window + 5:
             return out
 
-        filled = history.interpolate(limit=5, limit_direction="both").ffill().bfill()
+        # Columns that joined the dataset later (e.g. a series starting in
+        # 2023) are still real NaN for their entire pre-start history --
+        # bfill can't invent values for a column that hasn't started at
+        # all yet. Rather than block *every* column's forecast until the
+        # slowest-starting one has enough history (which used to leave the
+        # whole output empty for most of the sample), only feed the
+        # network the columns that already have enough real observations,
+        # and forecast just those; late columns simply get NaN until their
+        # own history catches up.
+        min_obs = self.window + 5
+        active_cols = [c for c in all_cols if history[c].notna().sum() >= min_obs]
+        if not active_cols:
+            return out
+
+        sub = history[active_cols]
+        filled = sub.interpolate(limit=5, limit_direction="both").ffill().bfill()
         if filled.isna().any().any():
-            return out  # a column never observed yet -- skip this step
+            return out  # shouldn't happen given the min_obs check, but guard anyway
         arr = filled.values.astype(np.float32)
 
-        self._ensure_net(len(cols))
-        if self._columns is not None and self._columns != cols:
+        if self._columns != active_cols:
+            # active column set grew (a new series just reached min_obs) --
+            # the network's input/output width changed, so it must be
+            # rebuilt and warm-started again from scratch on this new set.
             self._net = None
-            self._ensure_net(len(cols))
-        self._columns = cols
+            self._fitted_once = False
+        self._columns = active_cols
+        self._ensure_net(len(active_cols))
 
         if self.full_retrain:
             self._net = None
-            self._ensure_net(len(cols))
+            self._ensure_net(len(active_cols))
             X, y = self._build_examples(arr[:-1], max_examples=None)
             self._train(X, y, self.epochs_init)
-        elif self._net is not None and getattr(self, "_fitted_once", False):
+        elif getattr(self, "_fitted_once", False):
             X, y = self._build_examples(arr[:-1], max_examples=self.batch_history)
             self._train(X, y, self.epochs_refit)
         else:
@@ -209,5 +227,5 @@ class NNRevINMethod:
             Xt = torch.tensor(last_window[None, :, :], dtype=torch.float32)
             Ft = torch.tensor(_rolling_features(last_window)[None, :], dtype=torch.float32)
             pred = self._net(Xt, Ft).numpy()[0]
-        out.loc[cols] = pred
+        out.loc[active_cols] = pred
         return out
