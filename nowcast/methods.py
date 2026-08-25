@@ -145,7 +145,12 @@ class VARJointMethod:
         if len(valid_cols) < 1:
             return out
 
-        sub = block[valid_cols].interpolate(limit=3, limit_direction="both").dropna()
+        # .copy() consolidates the column subset into its own block --
+        # avoids a "DataFrame is highly fragmented" PerformanceWarning
+        # (and the extra copies pandas makes to work around it) if the
+        # incoming `history` frame was itself assembled by adding many
+        # columns one at a time upstream.
+        sub = block[valid_cols].copy().interpolate(limit=3, limit_direction="both").dropna()
         if len(sub) < self.min_obs_per_col:
             return out
 
