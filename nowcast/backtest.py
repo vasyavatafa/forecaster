@@ -119,7 +119,7 @@ def run_walk_forward_univariate(
         # not just an isolated bad window), not a success with some noise
         log_fail(stage, f"all {warner.count} step(s) failed, see [WARN] lines above")
     elif show_progress:
-        detail = f"n_train={n_tr} n_test={n_te} test_rmse={test_m.get('rmse'):.4g} ({elapsed:.2f}s)"
+        detail = f"n_train={n_tr} n_test={n_te} test_mase={test_m.get('mase'):.4g} ({elapsed:.2f}s)"
         if step_warn:
             detail += f" [{step_warn}]"
         log_ok(stage, detail)
@@ -197,7 +197,7 @@ def run_walk_forward_multivariate(
             # failure (bad config), not a success with some noise
             log_fail(col_stage, f"all {warner.count} step(s) failed, see [WARN] lines above")
         elif show_progress:
-            detail = f"n_train={n_tr} n_test={n_te} test_rmse={test_m.get('rmse'):.4g}"
+            detail = f"n_train={n_tr} n_test={n_te} test_mase={test_m.get('mase'):.4g}"
             if step_warn:
                 detail += f" [{step_warn}]"
             log_ok(col_stage, detail)
