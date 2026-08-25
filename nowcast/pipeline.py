@@ -197,15 +197,28 @@ class NowcastPipeline:
         methods = list_methods or list(METHOD_REGISTRY.keys())
         method_params = method_params or {}
 
-        out = self.df.copy() if keep_original else pd.DataFrame(index=self.df.index)
+        base = self.df.copy() if keep_original else pd.DataFrame(index=self.df.index)
 
+        # collect every forecast column into a plain dict first and add them
+        # all to the output in one pd.concat at the end, instead of
+        # `out[colname] = ...` inside the loop -- assigning columns one at a
+        # time onto a DataFrame that keeps growing (n_features x n_methods
+        # times) is exactly the pattern pandas warns about ("DataFrame is
+        # highly fragmented") and gets slower with every column added.
+        forecast_cols: dict[str, pd.Series] = {}
         for method in progress(methods, desc="forecast_table", disable=not show_progress):
             params = method_params.get(method, {})
             results = self.run(columns=features, method=method, method_params=params, show_progress=show_progress)
             for col in features:
                 colname = f"{col}_{method}_frcst"
                 res = results.get(col)
-                out[colname] = res.forecast.reindex(out.index) if res is not None else np.nan
+                forecast_cols[colname] = (
+                    res.forecast.reindex(base.index) if res is not None
+                    else pd.Series(np.nan, index=base.index)
+                )
+
+        forecasts = pd.DataFrame(forecast_cols, index=base.index)
+        out = pd.concat([base, forecasts], axis=1)
 
         if save_path:
             out.to_csv(save_path)
